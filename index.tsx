@@ -21,7 +21,9 @@ import {
   Wand2,
   Settings,
   X,
-  FileText
+  FileText,
+  FileUp,
+  Paperclip
 } from "lucide-react";
 
 // --- Configuration ---
@@ -67,6 +69,11 @@ interface HistoryItem {
   timestamp: number;
 }
 
+interface PdfFile {
+  name: string;
+  base64: string;
+}
+
 const CATEGORIES: Category[] = [
   { id: 'article', label: 'Article', bnLabel: 'প্রবন্ধ', icon: PenTool, description: 'তথ্যবহুল ও বিশ্লেষণধর্মী লেখা' },
   { id: 'fiction', label: 'Fiction', bnLabel: 'গল্প', icon: BookOpen, description: 'কাল্পনিক ও সৃজনশীল গল্প' },
@@ -105,6 +112,7 @@ function App() {
   const [selectedCategory, setSelectedCategory] = useState<CategoryId>('article');
   const [idea, setIdea] = useState("");
   const [styleRef, setStyleRef] = useState("");
+  const [pdfFile, setPdfFile] = useState<PdfFile | null>(null);
   const [generatedContent, setGeneratedContent] = useState("");
   
   // Settings
@@ -126,6 +134,9 @@ function App() {
   const [isGeneratingAudio, setIsGeneratingAudio] = useState(false);
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
+
+  // Refs
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // History State
   const [history, setHistory] = useState<HistoryItem[]>([]);
@@ -168,7 +179,7 @@ function App() {
     setIdea(item.idea);
     setGeneratedContent(item.content);
     setShowHistory(false);
-    setShowStyleBadge(false); // Can't track style ref from simple history yet
+    setShowStyleBadge(false); 
   };
 
   const getWordCount = (text: string) => {
@@ -186,6 +197,40 @@ function App() {
     document.body.removeChild(element);
   };
 
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.type !== 'application/pdf') {
+      setError("শুধুমাত্র PDF ফাইল আপলোড করা যাবে।");
+      return;
+    }
+
+    if (file.size > 20 * 1024 * 1024) { // 20MB limit
+      setError("ফাইলের আকার অনেক বড়। দয়া করে ২০MB এর নিচের ফাইল দিন।");
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (loadEvent) => {
+      const result = loadEvent.target?.result as string;
+      const base64 = result.split(',')[1]; // Remove data URL prefix
+      setPdfFile({
+        name: file.name,
+        base64: base64
+      });
+      setError(null);
+    };
+    reader.readAsDataURL(file);
+    
+    // Reset input value so same file can be selected again if needed
+    e.target.value = '';
+  };
+
+  const clearPdf = () => {
+    setPdfFile(null);
+  };
+
   // --- Core Functions ---
 
   const handleGenerate = async () => {
@@ -197,15 +242,16 @@ function App() {
     setIsLoading(true);
     setError(null);
     setGeneratedContent("");
-    setShowStyleBadge(!!styleRef.trim());
-    stopAudio(); // Stop any playing audio
+    const hasStyle = !!styleRef.trim() || !!pdfFile;
+    setShowStyleBadge(hasStyle);
+    stopAudio(); 
 
     try {
       if (!ai) throw new Error("API Key missing");
 
-      // Construct Prompt
-      let systemInstruction = `You are an expert Bengali creative writer known for your eloquent and engaging prose. Your task is to write a piece of content in Bengali based on the user's specific requirements. Language: STRICTLY BENGALI.`;
-      
+      // Construct Prompt Parts
+      const parts: any[] = [];
+
       let userPrompt = `Task: Write a ${CATEGORIES.find(c => c.id === selectedCategory)?.label} (${CATEGORIES.find(c => c.id === selectedCategory)?.bnLabel}) about: "${idea}".\n`;
       userPrompt += `Length: ${lengthOpt} (approx ${lengthOpt === 'short' ? '150' : lengthOpt === 'medium' ? '300' : '600'} words).\n`;
 
@@ -213,13 +259,30 @@ function App() {
         userPrompt += `Tone: Write in a nostalgic, first-person perspective with emotional depth. Use sensory details to evoke memory.\n`;
       }
 
+      // Add Style Reference (Text)
       if (styleRef.trim()) {
-        userPrompt += `\nCRITICAL STYLE INSTRUCTION: Analyze the following sample text carefully. Mimic its vocabulary, sentence structure, tone, flow, and emotion. Adapt this EXACT style to write the new content.\n\nSample Text (Training Data):\n"${styleRef}"\n`;
+        userPrompt += `\nCRITICAL STYLE INSTRUCTION: Analyze the provided sample text below. Mimic its vocabulary, sentence structure, tone, flow, and emotion. Adapt this EXACT style to write the new content.\n\nSample Text (Training Data):\n"${styleRef}"\n`;
       }
+
+      // Add Style Reference (PDF)
+      if (pdfFile) {
+        userPrompt += `\nCRITICAL STYLE INSTRUCTION: Analyze the attached PDF document. It contains the writing style you must mimic. Pay attention to the author's voice, word choice, and rhythm. Adapt this EXACT style for the generated content.\n`;
+        parts.push({
+          inlineData: {
+            mimeType: "application/pdf",
+            data: pdfFile.base64
+          }
+        });
+      }
+
+      // Add the main text prompt as the last part (or after the file)
+      parts.push({ text: userPrompt });
+
+      const systemInstruction = `You are an expert Bengali creative writer known for your eloquent and engaging prose. Your task is to write a piece of content in Bengali based on the user's specific requirements. Language: STRICTLY BENGALI.`;
 
       const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
-        contents: userPrompt,
+        contents: { parts: parts },
         config: {
           systemInstruction: systemInstruction,
           temperature: creativity,
@@ -237,7 +300,7 @@ function App() {
     } catch (err) {
       console.warn("API Error or Fallback triggered:", err);
       // Mock Fallback
-      const mockText = getMockResponse(selectedCategory, idea, !!styleRef.trim());
+      const mockText = getMockResponse(selectedCategory, idea, hasStyle);
       await new Promise(resolve => setTimeout(resolve, 1500));
       setGeneratedContent(mockText);
     } finally {
@@ -552,7 +615,7 @@ function App() {
                   <Wand2 size={16} className="text-slate-700" />
                   <span className="text-sm font-semibold text-slate-700">স্টাইল মিমিক্রি (Style AI)</span>
                 </div>
-                 {styleRef.trim() ? (
+                 {styleRef.trim() || pdfFile ? (
                     <span className="text-[10px] bg-green-100 text-green-700 px-2 py-0.5 rounded-full font-bold">ACTIVE</span>
                  ) : (
                     <span className="text-[10px] bg-slate-200 text-slate-500 px-2 py-0.5 rounded-full font-bold">OPTIONAL</span>
@@ -560,16 +623,63 @@ function App() {
               </button>
               
               {isStyleOpen && (
-                <div className="p-4 border-t border-slate-200">
-                   <p className="text-xs text-slate-500 mb-2 leading-relaxed">
-                     পছন্দের লেখকের লেখার অংশ এখানে পেস্ট করুন। AI সেই লেখার ভঙ্গি অনুকরণ করবে।
+                <div className="p-4 border-t border-slate-200 space-y-3">
+                   <p className="text-xs text-slate-500 mb-1 leading-relaxed">
+                     পছন্দের লেখকের লেখার অংশ পেস্ট করুন অথবা পিডিএফ আপলোড করুন।
                    </p>
+                  
+                  {/* Text Input */}
                   <textarea
                     value={styleRef}
                     onChange={(e) => setStyleRef(e.target.value)}
                     placeholder="নমুনা টেক্সট এখানে দিন..."
-                    className="w-full h-32 p-3 rounded-lg border border-slate-300 focus:border-amber-500 focus:ring-1 focus:ring-amber-500 outline-none resize-none text-sm leading-relaxed"
+                    disabled={!!pdfFile}
+                    className={`w-full h-24 p-3 rounded-lg border focus:border-amber-500 focus:ring-1 focus:ring-amber-500 outline-none resize-none text-sm leading-relaxed ${pdfFile ? 'bg-slate-100 text-slate-400 border-slate-200' : 'bg-white border-slate-300'}`}
                   />
+
+                  {/* Divider */}
+                  <div className="relative flex items-center justify-center">
+                    <div className="absolute inset-0 border-t border-slate-200"></div>
+                    <span className="relative bg-white px-2 text-[10px] text-slate-400 uppercase tracking-wide">অথবা (OR)</span>
+                  </div>
+
+                  {/* File Input */}
+                  <div className="flex items-center gap-3">
+                    <input 
+                      type="file" 
+                      accept="application/pdf" 
+                      ref={fileInputRef}
+                      className="hidden" 
+                      onChange={handleFileUpload}
+                    />
+                    
+                    {pdfFile ? (
+                      <div className="flex-1 flex items-center justify-between bg-amber-50 border border-amber-200 rounded-lg p-2.5">
+                        <div className="flex items-center gap-2 overflow-hidden">
+                           <div className="bg-red-500 text-white p-1 rounded">
+                             <FileText size={14} />
+                           </div>
+                           <span className="text-xs font-semibold text-slate-700 truncate max-w-[150px]">{pdfFile.name}</span>
+                        </div>
+                        <button 
+                          onClick={clearPdf}
+                          className="text-slate-400 hover:text-red-500 transition-colors p-1"
+                          title="Remove file"
+                        >
+                          <X size={14} />
+                        </button>
+                      </div>
+                    ) : (
+                      <button 
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={!!styleRef.trim()}
+                        className={`flex-1 flex items-center justify-center gap-2 border-2 border-dashed rounded-lg p-3 transition-all ${styleRef.trim() ? 'border-slate-100 bg-slate-50 text-slate-300 cursor-not-allowed' : 'border-slate-200 hover:border-amber-400 hover:bg-amber-50/50 text-slate-600'}`}
+                      >
+                         <FileUp size={16} />
+                         <span className="text-xs font-semibold">পিডিএফ আপলোড করুন (PDF)</span>
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
             </section>
